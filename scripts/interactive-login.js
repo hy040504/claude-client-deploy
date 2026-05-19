@@ -4,14 +4,14 @@
  * magic-link 접속 후 자동 로그인이 완료되는 상황을 완벽하게 처리합니다.
  */
 
-import { createAppConfig } from "./src/config/app-config.js";
-import { findLatestClaudeMail } from "./src/gmail/latest-claude-mail.js";
-import { connectRealBrowser } from "./src/browser/real-browser.js";
-import { applyJarCookies } from "./src/browser/cookie-sync.js";
-import { loadJar } from "./src/state/cookie-jar.js";
-import { requestMagicLinkWithCycleTls, verifyMagicLinkWithCycleTls } from "./src/auth/magic-link.js";
-import { saveLatestClaudeCode } from "./src/state/latest-claude-code.js";
-import { shutdownCycleTls } from "./src/http/cycletls-client.js";
+import { createAppConfig } from "../src/config/app-config.js";
+import { findLatestClaudeMail } from "../src/gmail/latest-claude-mail.js";
+import { connectRealBrowser } from "../src/browser/real-browser.js";
+import { applyJarCookies } from "../src/browser/cookie-sync.js";
+import { loadJar } from "../src/state/cookie-jar.js";
+import { requestMagicLinkWithCycleTls, verifyMagicLinkWithCycleTls } from "../src/auth/magic-link.js";
+import { saveLatestClaudeCode } from "../src/state/latest-claude-code.js";
+import { shutdownCycleTls } from "../src/http/cycletls-client.js";
 import { setTimeout as delay } from "node:timers/promises";
 import chalk from "chalk";
 

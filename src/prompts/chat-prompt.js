@@ -51,10 +51,10 @@ export async function runChatPrompt() {
     if (selected === "1") {
       console.log("\n[Background Login] 자동 로그인을 시작합니다.");
       console.log("실패 시 안내에 따라 Interactive Login으로 재시도해주세요.");
-      await runNodeScript(fromProjectRoot("background-login.js"));
+      await runNodeScript(fromProjectRoot("scripts/background-login.js"));
     } else if (selected === "2") {
       console.log("\n[Interactive Login] 보이는 Chrome 창을 통해 로그인을 시작합니다.");
-      await runNodeScript(fromProjectRoot("interactive-login.js"));
+      await runNodeScript(fromProjectRoot("scripts/interactive-login.js"));
     } else if (selected === "3") {
       const cookieHeader = await ask(rl, "Cookie header");
       if (!cookieHeader) {

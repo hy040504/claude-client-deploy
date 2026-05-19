@@ -4,10 +4,10 @@
  * 진짜 Headless 모드(창 숨김)와 독립적인 고속 스피너가 적용되었습니다.
  */
 
-import { createAppConfig } from "./src/config/app-config.js";
-import { connectRealBrowser } from "./src/browser/real-browser.js";
-import { findLatestClaudeMail } from "./src/gmail/latest-claude-mail.js";
-import { requestMagicLinkWithCycleTls } from "./src/auth/magic-link.js";
+import { createAppConfig } from "../src/config/app-config.js";
+import { connectRealBrowser } from "../src/browser/real-browser.js";
+import { findLatestClaudeMail } from "../src/gmail/latest-claude-mail.js";
+import { requestMagicLinkWithCycleTls } from "../src/auth/magic-link.js";
 import { setTimeout as delay } from "node:timers/promises";
 import chalk from "chalk";
 

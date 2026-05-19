@@ -1,4 +1,4 @@
-import { runClientPrompt } from "./src/prompts/client-prompt.js";
+import { runClientPrompt } from "../src/prompts/client-prompt.js";
 
 try {
   await runClientPrompt();

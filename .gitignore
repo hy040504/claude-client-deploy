@@ -6,3 +6,5 @@ node_modules/
 .gemini/
 logs/
 *.log
+
+send_message.js
