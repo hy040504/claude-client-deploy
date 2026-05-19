@@ -1,10 +1,10 @@
 # claude-client-deploy
 
-Claude.ai CLI Client ¹èÆ÷¿ë ÀúÀå¼ÒÀÔ´Ï´Ù.
+Claude.ai CLI Client ë°°í¬ìš© ì €ì¥ì†Œì…ë‹ˆë‹¤.
 
-## ?? ¼³Ä¡ ¹× »ç¿ë¹ı
+## ğŸš€ ì„¤ì¹˜ ë° ì‚¬ìš©ë²•
 
-1. `npm install` ·Î ÀÇÁ¸¼º ¼³Ä¡
-2. `.env.example` À» `.env` ·Î º¹»ç ÈÄ Á¤º¸ ÀÔ·Â
-3. `node background-login.js` ·Î ·Î±×ÀÎ
-4. `npm run chat-prompt` ·Î Ã¤ÆÃ ½ÃÀÛ
+1. `npm install` ë¡œ ì˜ì¡´ì„± ì„¤ì¹˜
+2. `.env.example` ì„ `.env` ë¡œ ë³µì‚¬ í›„ ì •ë³´ ì…ë ¥
+3. `node background-login.js` ë¡œ ë¡œê·¸ì¸
+4. `npm run chat-prompt` ë¡œ ì±„íŒ… ì‹œì‘
