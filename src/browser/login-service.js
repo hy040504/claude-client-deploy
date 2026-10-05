@@ -1,15 +1,14 @@
+import { redactUrl } from "../shared/mask.js";
+import { hasGmailAuth } from "../gmail/gmail-client.js";
 import { setTimeout as delay } from "node:timers/promises";
 import { connectRealBrowser } from "./real-browser.js";
 import { loadJar, saveJar } from "../state/cookie-jar.js";
-import { applyJarCookies, toSetCookieLine } from "./cookie-sync.js";
-import { findLatestClaudeMail } from "../gmail/latest-claude-mail.js";
-import { createCycleTlsHttpClient } from "../http/cycletls-client.js";
-import { loadBrowserState, saveBrowserState } from "../state/browser-state.js";
+import { toSetCookieLine } from "./cookie-sync.js";
+import { createClaudeMailReader } from "../gmail/latest-claude-mail.js";
+import { isCurrentLoginMail, waitForLoginMail } from "../gmail/login-mail.js";
 import { saveLatestClaudeCode } from "../state/latest-claude-code.js";
 import { resolveBrowserMode } from "./session-manager.js";
-import { requestMagicLinkWithCycleTls, verifyMagicLinkWithCycleTls, openVerificationLinkWithCycleTls } from "../auth/magic-link.js";
-import ClaudeArkose from "../arkose/claude-arkose.js";
-import { callArkoseSolver } from "../arkose/solver.js";
+import { requestMagicLinkWithCycleTls, openVerificationLinkWithCycleTls } from "../auth/magic-link.js";
 const LOGIN_COOKIE_NAMES = ["sessionKey", "routingHint", "lastActiveOrg"];
 
 /**
@@ -20,7 +19,7 @@ const LOGIN_COOKIE_NAMES = ["sessionKey", "routingHint", "lastActiveOrg"];
 export async function collectBrowserCookies(config) {
   const cycleTlsLogin = await collectCookiesWithCycleTlsLogin(config);
   if (cycleTlsLogin?.cookies?.length) {
-    console.log("[login] using CycleTLS login result; browser fallback not needed.");
+    console.log("[login] CycleTLS로 확보한 로그인 쿠키를 사용합니다.");
     return cycleTlsLogin.cookies;
   }
   const pendingCycleTlsMail = cycleTlsLogin?.mail || null;
@@ -39,12 +38,12 @@ export async function collectBrowserCookies(config) {
     } catch (error) {
       lastError = error;
       if (mode !== "background") throw error;
-      console.log(`[login] background Chrome login did not complete: ${error?.message || error}`);
-      console.log("[login] retrying login with interactive Chrome.");
+      console.log(`[login] 백그라운드 Chrome 로그인이 완료되지 않았습니다: ${error?.message || error}`);
+      console.log("[login] 화면을 표시하는 Chrome 모드로 다시 시도합니다.");
     }
   }
 
-  throw lastError || new Error("Chrome login failed.");
+  throw lastError || new Error("Chrome 로그인에 실패했습니다.");
 }
 
 /**
@@ -58,14 +57,11 @@ async function collectBrowserCookiesWithChromeMode(config, { mode, pendingCycleT
     mode === "background"
       ? {
           ...config,
-          browserLoginTimeoutMs: Math.min(
-            config.browserLoginTimeoutMs,
-            config.browserLoginBackgroundTimeoutMs || 60000
-          )
+          browserLoginTimeoutMs: Math.min(config.browserLoginTimeoutMs, config.browserLoginBackgroundTimeoutMs || 60000)
         }
       : config;
 
-  console.log(`[login] opening ${mode} Chrome fallback (${fallbackReason}).`);
+  console.log(`[login] ${mode} Chrome으로 로그인을 이어갑니다. 사유: ${fallbackReason}`);
 
   const { browser, page } = await connectRealBrowser(config, {
     userDataDir: config.profilePath,
@@ -141,9 +137,7 @@ async function waitForLoginCookies(page, config) {
     if (Date.now() - lastProgressAt >= 30000) {
       lastProgressAt = Date.now();
       const location = safePageUrl(page);
-      console.log(
-        `[login] waiting for browser login... ${summarizeCookiePresence(cookies)} current_url=${location}`
-      );
+      console.log(`[login] waiting for browser login... ${summarizeCookiePresence(cookies)} current_url=${location}`);
     }
     await delay(config.browserLoginPollMs);
   }
@@ -167,7 +161,9 @@ function hasLoginCookies(cookies) {
  * @returns {boolean} 중요 쿠키 여부
  */
 function isImportantCookie(cookie) {
-  return ["sessionKey", "sessionKeyLC", "routingHint", "lastActiveOrg", "cf_clearance", "__cf_bm", "_cfuvid"].includes(cookie.name);
+  return ["sessionKey", "sessionKeyLC", "routingHint", "lastActiveOrg", "cf_clearance", "__cf_bm", "_cfuvid"].includes(
+    cookie.name
+  );
 }
 
 /**
@@ -181,92 +177,81 @@ function expiresText(cookie) {
 }
 
 /**
- * Gmail 인증 정보가 채워졌는지 확인한다.
- * @param {object} config - 애플리케이션 설정
- * @returns {boolean} Gmail API 사용 가능 여부
- */
-function hasGmailAuth(config) {
-  return Boolean(config.gmailClientId && config.gmailClientSecret && config.gmailRefreshToken);
-}
-
-
-/**
- * CycleTLS + AZAPI.ai를 사용한 Claude 로그인 시도
- * Arkose Solver 실패 시 Chrome fallback으로 넘어감
+ * 브라우저를 열기 전에 HTTP 로그인을 시도하고 실패하면 다음 경로에 필요한 정보를 넘긴다.
+ * @param {object} config - 계정 및 로그인 방식 설정
+ * @returns {Promise<object>} 로그인 쿠키 또는 브라우저 재시도 사유
  */
 async function collectCookiesWithCycleTlsLogin(config) {
-    if (!config.claudeCycleTlsLogin) {
-        console.log("[login] CycleTLS login skipped: CLAUDE_CYCLETLS_LOGIN is disabled.");
-        return { fallbackReason: "cycletls_disabled" };
-    }
-    if (!config.gmailTryCycleTlsVerificationLink) {
-        console.log("[login] CycleTLS login skipped: GMAIL_TRY_CYCLETLS_VERIFICATION_LINK is disabled.");
-        return { fallbackReason: "cycletls_verification_disabled" };
-    }
+  if (!config.claudeCycleTlsLogin) {
+    console.log("[login] CLAUDE_CYCLETLS_LOGIN이 꺼져 있어 HTTP 로그인을 건너뜁니다.");
+    return { fallbackReason: "cycletls_disabled" };
+  }
+  if (!config.gmailTryCycleTlsVerificationLink) {
+    console.log("[login] HTTP 인증 링크 처리가 꺼져 있어 브라우저 로그인을 사용합니다.");
+    return { fallbackReason: "cycletls_verification_disabled" };
+  }
 
-    const email = config.claudeLoginEmail || config.gmailUserEmail;
-    if (!email) {
-        console.log("[login] CycleTLS login skipped: CLAUDE_LOGIN_EMAIL or GMAIL_USER_EMAIL is not set.");
-        return { fallbackReason: "missing_login_email" };
-    }
+  const email = config.claudeLoginEmail || config.gmailUserEmail;
+  if (!email) {
+    console.log("[login] 로그인 이메일이 설정되지 않아 HTTP 로그인을 건너뜁니다.");
+    return { fallbackReason: "missing_login_email" };
+  }
 
-    if (!hasGmailAuth(config)) {
-        console.log("[login] CycleTLS login skipped: Gmail API credentials are not configured.");
-        return { fallbackReason: "missing_gmail_auth" };
-    }
+  if (!hasGmailAuth(config)) {
+    console.log("[login] Gmail 인증 정보가 없어 브라우저에서 직접 로그인해야 합니다.");
+    return { fallbackReason: "missing_gmail_auth" };
+  }
 
-    console.log(`[login] Starting CycleTLS + AZAPI.ai login for ${maskEmail(email)}...`);
+  console.log(`[login] ${maskEmail(email)} 계정으로 HTTP 로그인을 시작합니다.`);
 
-    const sentAt = Date.now();
+  const sentAt = Date.now();
 
-    // ==================== Magic Link 요청 (AZAPI.ai 포함) ====================
-    const sent = await requestMagicLinkWithCycleTls(config, { 
-        email, 
-        source: "claude" 
-    });
+  // ==================== Magic Link 요청 ====================
+  const sent = await requestMagicLinkWithCycleTls(config, {
+    email,
+    source: "claude"
+  });
 
-    if (!sent.ok) {
-        console.log(`[login] Magic link request failed: ${sent.reason || "unknown"}`);
-        return { fallbackReason: sent.reason || "magic_link_request_failed" };
-    }
+  if (!sent.ok) {
+    console.log(`[login] 인증 메일 요청 실패: ${sent.reason || "unknown"}`);
+    return { fallbackReason: sent.reason || "magic_link_request_failed" };
+  }
 
-    console.log(`[login] Magic link requested successfully.`);
+  console.log(`[login] 인증 메일을 요청했습니다.`);
 
-    // ==================== 메일 대기 ====================
-    const mail = await waitForCycleTlsLoginMail(config, sentAt);
-    if (!mail) {
-        console.log("[login] Timed out waiting for Claude login email.");
-        return { fallbackReason: "login_mail_timeout" };
-    }
+  // ==================== 메일 대기 ====================
+  const mail = await waitForCycleTlsLoginMail(config, sentAt);
+  if (!mail) {
+    console.log("[login] 제한 시간 안에 Claude 인증 메일을 받지 못했습니다.");
+    return { fallbackReason: "login_mail_timeout" };
+  }
 
-    const link = mail.verificationLinks?.[0]?.url;
-    if (!link) {
-        console.log("[login] CycleTLS login mail did not contain a verification link; falling back to Chrome.");
-        return { mail, fallbackReason: "verification_link_missing" };
-    }
+  const link = mail.verificationLinks?.[0]?.url;
+  if (!link) {
+    console.log("[login] 메일에 인증 링크가 없어 Chrome으로 로그인을 이어갑니다.");
+    return { mail, fallbackReason: "verification_link_missing" };
+  }
 
-    // ==================== Verification Link 처리 ====================
-    const opened = await openVerificationLinkWithCycleTls(config, null, link);
-    if (!opened.ok) {
-        return {
-            mail: { ...mail, magicLinkCode: opened.code || null },
-            fallbackReason: opened.reason || "verification_link_failed"
-        };
-    }
+  // ==================== Verification Link 처리 ====================
+  const opened = await openVerificationLinkWithCycleTls(config, email, link);
+  if (!opened.ok) {
+    return {
+      mail: { ...mail, magicLinkCode: opened.code || null },
+      fallbackReason: opened.reason || "verification_link_failed"
+    };
+  }
 
-    // ==================== 최종 쿠키 확인 ====================
-    const cookies = await browserCookiesFromJar(config);
-    if (!hasLoginCookies(cookies)) {
-        console.log(
-            `[login] CycleTLS login completed without required login cookies; cookie state=${summarizeCookiePresence(cookies)}.`
-        );
-        return { mail, fallbackReason: "login_cookies_missing_after_cycletls" };
-    }
+  // ==================== 최종 쿠키 확인 ====================
+  const cookies = await browserCookiesFromJar(config);
+  if (!hasLoginCookies(cookies)) {
+    console.log(`[login] HTTP 로그인 후 필수 쿠키가 부족합니다. 쿠키 상태=${summarizeCookiePresence(cookies)}.`);
+    return { mail, fallbackReason: "login_cookies_missing_after_cycletls" };
+  }
 
-    console.log(`[login] ✅ CycleTLS login succeeded without opening Chrome!`);
-    console.log(`[login] cookie state=${summarizeCookiePresence(cookies)}`);
-    
-    return { cookies };
+  console.log(`[login] HTTP 로그인에 성공했습니다.`);
+  console.log(`[login] 쿠키 상태=${summarizeCookiePresence(cookies)}`);
+
+  return { cookies };
 }
 
 /**
@@ -276,59 +261,11 @@ async function collectCookiesWithCycleTlsLogin(config) {
  * @returns {Promise<object|null>} 발견된 Claude 메일
  */
 export async function waitForCycleTlsLoginMail(config, sentAt) {
-    const TIMEOUT_MS = 3 * 60 * 1000; // 최대 3분
-    const POLL_INTERVAL_MS = config.gmailPollMs || 4000;
-    const LOG_INTERVAL_MS = 15000; // 15초마다 로그 출력
-    const DATE_ALLOWANCE_MS = 5 * 60 * 1000; // ± 5분 여유 부여
-
-    const deadline = Date.now() + TIMEOUT_MS;
-    let lastMessageId = null;
-    let lastLogAt = 0;
-
-    // 더 구체적인 Gmail 쿼리 설정
-    const query = config.gmailClaudeQuery || "from:(no-reply@anthropic.com OR claude@anthropic.com) (subject:\"Claude.ai 로그인용 보안 링크\" OR subject:\"보안 링크\")";
-
-    console.log(`[gmail] Claude 로그인 메일 기다리는 중... (최대 3분, 쿼리: ${query})`);
-
-    while (Date.now() < deadline) {
-        const mail = await findLatestClaudeMail(config, {
-            allowMissing: true,
-            query: query,
-            maxResults: config.gmailClaudeMaxResults || 10
-        }).catch(error => {
-            console.log(`[gmail] 조회 오류: ${error?.message || error}`);
-            return null;
-        });
-
-        if (mail?.messageId && mail.messageId !== lastMessageId) {
-            lastMessageId = mail.messageId;
-
-            // 메일 감지 조건 강화 및 날짜 체크 완화
-            const isFromAnthropic = /anthropic\.com/i.test(mail.from || "");
-            const hasCorrectSubject = /보안 링크|security link/i.test(mail.subject || "");
-            const isRecentEnough = !mail.internalDate || (mail.internalDate >= (sentAt - DATE_ALLOWANCE_MS));
-
-            if (isFromAnthropic && hasCorrectSubject && isRecentEnough) {
-                console.log(`[gmail] ✅ 새 Claude 로그인 메일 감지!`);
-                printClaudeMail(mail);
-                return mail;
-            } else {
-                console.log(`[gmail] 기존 또는 조건 미달 메일 스킵 (Subject: ${mail.subject}, From: ${mail.from})`);
-            }
-        }
-
-        // 15초마다 진행 상황 출력
-        if (Date.now() - lastLogAt >= LOG_INTERVAL_MS) {
-            const elapsed = Math.floor((Date.now() - sentAt) / 1000);
-            console.log(`[gmail] 메일 대기 중... (${elapsed}초 경과)`);
-            lastLogAt = Date.now();
-        }
-
-        await delay(POLL_INTERVAL_MS);
-    }
-
-    console.log(`[gmail] ❌ Claude 로그인 메일 대기 시간 초과 (${Math.floor((Date.now() - sentAt)/1000)}초)`);
-    return null;
+  console.log("[gmail] 이번 로그인 요청의 인증 메일을 기다립니다. 최대 대기 시간은 3분입니다.");
+  const mail = await waitForLoginMail(config, sentAt);
+  if (mail) printClaudeMail(mail);
+  else console.log("[gmail] 제한 시간 안에 새 인증 메일이 도착하지 않았습니다.");
+  return mail;
 }
 
 /**
@@ -377,29 +314,33 @@ async function watchClaudeMail(config, signal, browser, loginPage) {
   let lastMessageId = null;
   const watchStartedAt = Date.now();
   let skippedExistingMail = false;
+  const readMail = createClaudeMailReader(config);
 
   while (!signal.aborted) {
     try {
-      const mail = await findLatestClaudeMail(config, {
+      const mail = await readMail({
         allowMissing: true,
         query: config.gmailClaudeQuery,
-        maxResults: config.gmailClaudeMaxResults
+        maxResults: config.gmailClaudeMaxResults,
+        signal
       });
 
       if (mail && mail.messageId && mail.messageId !== lastMessageId) {
         lastMessageId = mail.messageId;
-        if (mail.internalDate && mail.internalDate < watchStartedAt) {
+        if (!isCurrentLoginMail(mail, watchStartedAt)) {
           if (!skippedExistingMail) {
-            console.log("[gmail] existing Claude mail ignored; waiting for a new login email.");
+            console.log("[gmail] 이전 메일이나 인증 조건에 맞지 않는 메일을 제외하고 새 메일을 기다립니다.");
             skippedExistingMail = true;
           }
           continue;
         }
 
+        if (signal.aborted) return;
         printClaudeMail(mail);
         await openVerificationLinkFromMail(config, browser, loginPage, mail);
       }
     } catch (error) {
+      if (signal.aborted) return;
       const message = String(error?.message || error);
       if (message.includes("Gmail API를 사용하려면")) {
         console.log(message);
@@ -409,7 +350,12 @@ async function watchClaudeMail(config, signal, browser, loginPage) {
       console.log(`[gmail] ${message}`);
     }
 
-    await delay(Math.max(1000, config.gmailPollMs || 10000));
+    try {
+      await delay(Math.max(1000, config.gmailPollMs || 10000), undefined, { signal });
+    } catch (error) {
+      if (signal.aborted) return;
+      throw error;
+    }
   }
 }
 
@@ -442,11 +388,15 @@ async function openVerificationLinkFromMail(config, browser, loginPage, mail) {
       verificationLink: link.url
     });
     const filled = await fillVerificationCode(loginPage, mail.magicLinkCode, config);
-    if (filled && await waitForLoginPageSuccess(loginPage, config)) return;
+    if (filled && (await waitForLoginPageSuccess(loginPage, config))) return;
   }
 
   if (!mail.magicLinkCode && config.gmailTryCycleTlsVerificationLink) {
-    const result = await openVerificationLinkWithCycleTls(config, loginPage, link.url);
+    const result = await openVerificationLinkWithCycleTls(
+      config,
+      config.claudeLoginEmail || config.gmailUserEmail,
+      link.url
+    );
     if (result.ok) return;
     if (result.code) {
       persistLatestClaudeCode(config, result.code, {
@@ -455,12 +405,12 @@ async function openVerificationLinkFromMail(config, browser, loginPage, mail) {
         verificationLink: link.url
       });
       const filled = await fillVerificationCode(loginPage, result.code, config);
-      if (filled && await waitForLoginPageSuccess(loginPage, config)) return;
+      if (filled && (await waitForLoginPageSuccess(loginPage, config))) return;
     }
   }
 
   try {
-    console.log(`[gmail] opening verification link in Chrome: ${link.url}`);
+    console.log(`[gmail] Chrome에서 새 인증 링크를 엽니다.`);
     const page = typeof browser.newPage === "function" ? await browser.newPage() : loginPage;
     setupPageNavigationLogging(page, config, page === loginPage ? "login" : "mail-link");
     await page.goto(link.url, {
@@ -470,22 +420,24 @@ async function openVerificationLinkFromMail(config, browser, loginPage, mail) {
     await delay(2000);
 
     const result = await extractVerificationPageResult(page);
-    console.log(`[gmail] opened url: ${result.url}`);
-    if (result.title) console.log(`[gmail] opened title: ${result.title}`);
+    console.log(`[gmail] 이동한 주소: ${redactUrl(result.url)}`);
+    if (result.title) console.log(`[gmail] 페이지 제목: ${result.title}`);
 
     if (isClaudeAppUrl(result.url, config)) {
-      console.log("[gmail] magic link redirected to Claude app; waiting for login cookies.");
+      console.log("[gmail] Claude 화면으로 이동했습니다. 로그인 쿠키를 기다립니다.");
       if (page !== loginPage) {
-        await loginPage.goto(config.baseUrl, {
-          waitUntil: "domcontentloaded",
-          timeout: Math.min(config.gmailVerificationLinkTimeoutMs || 60000, 15000)
-        }).catch(() => {});
+        await loginPage
+          .goto(config.baseUrl, {
+            waitUntil: "domcontentloaded",
+            timeout: Math.min(config.gmailVerificationLinkTimeoutMs || 60000, 15000)
+          })
+          .catch(() => {});
       }
       return;
     }
 
     if (result.codes.length) {
-      console.log(`[gmail] page code candidates: ${result.codes.join(", ")}`);
+      console.log(`[gmail] 인증 코드 후보 ${result.codes.length}개를 확보했습니다.`);
       persistLatestClaudeCode(config, result.codes[0], {
         source: "verification-page",
         email: config.claudeLoginEmail || config.gmailUserEmail || "",
@@ -495,50 +447,10 @@ async function openVerificationLinkFromMail(config, browser, loginPage, mail) {
       await fillVerificationCode(loginPage, result.codes[0], config);
       if (page !== loginPage) await fillVerificationCode(page, result.codes[0], config);
     } else {
-      console.log("[gmail] page code candidates: none");
+      console.log("[gmail] 페이지에서 인증 코드를 찾지 못했습니다.");
     }
   } catch (error) {
-    console.log(`[gmail] verification link open failed: ${error?.message || error}`);
-  }
-}
-
-
-/**
- * magic link nonce를 로그인 API가 받는 코드로 교환한다.
- * @param {object} http - HTTP 클라이언트
- * @param {object} config - 애플리케이션 설정
- * @param {URL} magicLink - Claude magic link URL
- * @returns {Promise<object>} 교환 결과
- */
-async function exchangeMagicLinkNonceForCode(http, config, magicLink) {
-  try {
-    const response = await http.post(
-      "/api/auth/exchange_nonce_for_code",
-      {
-        nonce: magicLink.nonce,
-        encoded_email_address: magicLink.encodedEmailAddress,
-        source: "claude"
-      },
-      {
-        responseType: "text",
-        headers: {
-          Accept: "application/json, text/plain, */*",
-          Referer: `${config.baseUrl}/magic-link`,
-          "Content-Type": "application/json"
-        }
-      }
-    );
-
-    const data = parseJsonResponse(response.data);
-    const code = typeof data?.code === "string" ? data.code : null;
-    magicLink.code = code;
-    if (!code) {
-      console.log(`[gmail] magic link code exchange returned no code (${response.status})`);
-    }
-    return code;
-  } catch (error) {
-    console.log(`[gmail] magic link code exchange failed: ${error?.message || error}`);
-    return null;
+    console.log(`[gmail] 인증 링크를 열지 못했습니다: ${error?.message || error}`);
   }
 }
 
@@ -553,41 +465,17 @@ async function waitForLoginPageSuccess(page, config) {
 
   const cookies = await page.cookies().catch(() => []);
   if (hasLoginCookies(cookies)) {
-    console.log("[gmail] login cookies detected after verification code submit.");
+    console.log("[gmail] 인증 코드 제출 후 로그인 쿠키를 확인했습니다.");
     return true;
   }
 
   const result = await extractVerificationPageResult(page).catch(() => null);
   if (result && isClaudeAppUrl(result.url, config)) {
-    console.log("[gmail] verification code submit reached Claude app; waiting for login cookies.");
+    console.log("[gmail] 인증 코드 제출 후 Claude 화면에 도착했습니다. 쿠키를 기다립니다.");
     return true;
   }
 
   return false;
-}
-
-/**
- * 메일에서 얻은 magic link를 검증 가능한 구조로 파싱한다.
- * @param {string} value - magic link 문자열
- * @returns {object|null} 파싱된 magic link 정보
- */
-function parseMagicLinkUrl(value) {
-  try {
-    const url = new URL(value);
-    if (url.pathname !== "/magic-link") return null;
-
-    const hash = decodeURIComponent(url.hash.replace(/^#/, ""));
-    const separatorIndex = hash.indexOf(":");
-    if (separatorIndex <= 0) return null;
-
-    const nonce = hash.slice(0, separatorIndex);
-    const encodedEmailAddress = hash.slice(separatorIndex + 1);
-    if (!nonce || !encodedEmailAddress) return null;
-
-    return { nonce, encodedEmailAddress, code: null };
-  } catch {
-    return null;
-  }
 }
 
 /**
@@ -613,7 +501,7 @@ function parseJsonResponse(value) {
  */
 async function prepareChromeLoginFallback(page, config, fallbackReason) {
   const email = config.claudeLoginEmail || config.gmailUserEmail;
-  console.log(`[login] Chrome fallback ready on ${page.url()} (${fallbackReason}).`);
+  console.log(`[login] Chrome 로그인 화면을 준비했습니다. 사유: ${fallbackReason}`);
 
   if (!email) return;
   if (await requestMagicLinkFromBrowserPage(page, config, email)) return;
@@ -621,9 +509,9 @@ async function prepareChromeLoginFallback(page, config, fallbackReason) {
 
   const primed = await fillEmailLoginForm(page, email);
   if (primed) {
-    console.log(`[login] pre-filled email on Chrome fallback for ${maskEmail(email)}.`);
+    console.log(`[login] Chrome 로그인 입력칸에 ${maskEmail(email)} 주소를 채웠습니다.`);
   } else {
-    console.log("[login] Chrome fallback email field was not detected; waiting for manual login.");
+    console.log("[login] 이메일 입력칸을 찾지 못했습니다. Chrome에서 직접 로그인하세요.");
   }
 }
 
@@ -645,16 +533,23 @@ async function requestMagicLinkFromBrowserPage(page, config, email) {
     if (hasLoginCookies(cookies)) return true;
 
     if (!safePageUrl(page).startsWith(loginUrl)) {
-      await page.goto(loginUrl, {
-        waitUntil: "domcontentloaded",
-        timeout: Math.min(timeoutMs, 60000)
-      }).catch(() => {});
+      await page
+        .goto(loginUrl, {
+          waitUntil: "domcontentloaded",
+          timeout: Math.min(timeoutMs, 60000)
+        })
+        .catch(() => {});
     }
 
     await waitForBrowserChallengeClear(page, timeoutMs);
 
     const result = await page.evaluate(
       async ({ email, locale, timeoutMs }) => {
+        /**
+         * 브라우저 요청이 제한 시간을 넘기면 중단하고 완료 후에는 타이머를 해제한다.
+         * @param {Function} fn - 중단 신호를 받아 실행할 요청 함수
+         * @returns {Promise<unknown>} 요청 함수의 반환값
+         */
         const withTimeout = async fn => {
           const controller = new AbortController();
           const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -665,7 +560,18 @@ async function requestMagicLinkFromBrowserPage(page, config, email) {
           }
         };
 
+        /**
+         * 오류 메시지가 너무 길어지지 않도록 응답 본문을 300자로 줄인다.
+         * @param {unknown} text - 응답 본문
+         * @returns {string} 길이를 제한한 본문
+         */
         const shortBody = text => String(text || "").slice(0, 300);
+        /**
+         * 일반 API 오류와 브라우저 확인 화면을 구분한다.
+         * @param {Response} response - 브라우저 fetch 응답
+         * @param {string} text - 응답 본문
+         * @returns {boolean} 브라우저 확인이 필요한 응답인지 여부
+         */
         const isCloudflareBlock = (response, text) =>
           response.status === 403 ||
           response.headers.get("cf-mitigated") === "challenge" ||
@@ -757,7 +663,7 @@ async function requestMagicLinkFromBrowserPage(page, config, email) {
     }
 
     if (result?.cfBlocked) {
-      console.log("[login] browser-session magic link blocked by Cloudflare; complete the Chrome challenge and continue manually.");
+      console.log("[login] 브라우저 확인 단계가 필요합니다. Chrome에 표시된 안내를 완료하세요.");
     } else {
       console.log(
         `[login] browser-session magic link request failed at ${result?.step || "unknown"} (${result?.status || "no-status"}).`
@@ -765,7 +671,7 @@ async function requestMagicLinkFromBrowserPage(page, config, email) {
     }
     return false;
   } catch (error) {
-    console.log(`[login] browser-session magic link request failed: ${error?.message || error}`);
+    console.log(`[login] 브라우저에서 인증 메일을 요청하지 못했습니다: ${error?.message || error}`);
     return false;
   }
 }
@@ -792,7 +698,7 @@ async function waitForBrowserChallengeClear(page, timeoutMs) {
     );
     return true;
   } catch {
-    console.log("[login] Chrome challenge still visible or not detectable; trying the same-session API request once.");
+    console.log("[login] 브라우저 확인 화면의 종료 여부가 불명확해 현재 세션으로 요청을 한 번 시도합니다.");
     return false;
   }
 }
@@ -845,13 +751,11 @@ async function fillEmailLoginForm(page, email) {
           rect.width > 0 &&
           rect.height > 0 &&
           input.type !== "hidden" &&
-          (
-            input.type === "email" ||
+          (input.type === "email" ||
             input.autocomplete === "email" ||
             metadata.includes("email") ||
             metadata.includes("e-mail") ||
-            metadata.includes("mail")
-          )
+            metadata.includes("mail"))
         );
       });
 
@@ -886,11 +790,7 @@ async function clickEmailSubmit(page) {
     const buttons = [...document.querySelectorAll("button, input[type='submit']")].filter(button => {
       const style = getComputedStyle(button);
       const rect = button.getBoundingClientRect();
-      const text = [
-        button.innerText,
-        button.value,
-        button.getAttribute("aria-label")
-      ]
+      const text = [button.innerText, button.value, button.getAttribute("aria-label")]
         .filter(Boolean)
         .join(" ")
         .toLowerCase();
@@ -901,15 +801,13 @@ async function clickEmailSubmit(page) {
         rect.width > 0 &&
         rect.height > 0 &&
         !button.disabled &&
-        (
-          text.includes("continue") ||
+        (text.includes("continue") ||
           text.includes("email") ||
           text.includes("sign in") ||
           text.includes("login") ||
           text.includes("continue with email") ||
           text.includes("계속") ||
-          text.includes("로그인")
-        )
+          text.includes("로그인"))
       );
     });
 
@@ -925,9 +823,7 @@ async function clickEmailSubmit(page) {
  */
 function summarizeCookiePresence(cookies) {
   const names = new Set(cookies.map(cookie => cookie.name));
-  return LOGIN_COOKIE_NAMES
-    .map(name => `${name}=${names.has(name) ? "yes" : "no"}`)
-    .join(", ");
+  return LOGIN_COOKIE_NAMES.map(name => `${name}=${names.has(name) ? "yes" : "no"}`).join(", ");
 }
 
 /**
@@ -946,7 +842,7 @@ function persistLatestClaudeCode(config, code, details = {}) {
     ...details
   };
   saveLatestClaudeCode(config.latestClaudeCodePath, payload);
-  console.log(`[gmail] saved latest verification code to ${config.latestClaudeCodePath}`);
+  console.log(`[gmail] 최신 인증 코드를 저장했습니다: ${config.latestClaudeCodePath}`);
 }
 
 /**
@@ -961,13 +857,18 @@ function setupPageNavigationLogging(page, config, label) {
   page.__claudeNavigationLoggingInstalled = true;
 
   let lastLoggedUrl = "";
+  /**
+   * 같은 주소의 반복 이동을 제외하고 인증 화면의 진행 상태를 출력한다.
+   * @param {string} event - 이동이나 페이지 열림을 알리는 이벤트 이름
+   * @returns {void} 반환값 없음
+   */
   const logPageState = event => {
     const url = safePageUrl(page);
     if (!url || url === "(unknown)" || (event === "framenavigated" && url === lastLoggedUrl)) return;
     lastLoggedUrl = url;
 
     const summary = summarizeNavigationTarget(url, config);
-    console.log(`[login] [${label}] ${event}: ${url}${summary ? ` (${summary})` : ""}`);
+    console.log(`[login] [${label}] ${event}: ${redactUrl(url)}${summary ? ` (${summary})` : ""}`);
   };
 
   page.on("domcontentloaded", () => logPageState("domcontentloaded"));
@@ -981,19 +882,17 @@ function setupPageNavigationLogging(page, config, label) {
       if (request.isNavigationRequest?.() && request.frame?.() === page.mainFrame()) {
         const url = request.url();
         const summary = summarizeNavigationTarget(url, config);
-        console.log(
-          `[login] [${label}] request: ${request.method()} ${url}${summary ? ` (${summary})` : ""}`
-        );
+        console.log(`[login] [${label}] request: ${request.method()} ${url}${summary ? ` (${summary})` : ""}`);
       }
     } catch {}
   });
 }
 
 /**
- * 로그에 남길 URL에서 민감한 쿼리 값을 숨긴다.
+ * 인증 화면의 종류를 구분해 이동 로그에 붙일 짧은 설명을 만든다.
  * @param {string} value - 원본 URL
  * @param {object} config - 애플리케이션 설정
- * @returns {string} 마스킹된 URL
+ * @returns {string} 화면 종류와 외부 도메인에 대한 요약
  */
 function summarizeNavigationTarget(value, config) {
   try {
@@ -1024,13 +923,6 @@ function summarizeNavigationTarget(value, config) {
 }
 
 /**
- * Claude 로그인 화면 구조가 바뀌어도 가능한 범위에서 인증번호를 자동 입력한다.
- * @param {object} page - Puppeteer page 객체
- * @param {string} code - 입력할 인증번호
- * @param {object} config - 애플리케이션 설정
- * @returns {Promise<boolean>} 자동 입력 성공 여부
- */
-/**
  * 자동 인증 흐름에서 확인된 코드를 브라우저 입력칸에 채운다.
  * @param {object} page - 브라우저 페이지
  * @param {string} code - 인증 코드
@@ -1043,7 +935,7 @@ async function fillVerificationCode(page, code, config) {
   try {
     const selector = await findVerificationInputSelector(page);
     if (!selector) {
-      console.log("[gmail] auto-fill skipped: verification input not found");
+      console.log("[gmail] 인증 코드 입력칸이 없어 자동 입력을 건너뜁니다.");
       return false;
     }
 
@@ -1053,11 +945,11 @@ async function fillVerificationCode(page, code, config) {
       if (input) input.value = "";
     }, selector);
     await page.type(selector, code, { delay: 30 });
-    console.log(`[gmail] auto-filled verification code into ${selector}`);
+    console.log(`[gmail] 인증 코드를 자동 입력했습니다: ${selector}`);
     await clickVerificationSubmit(page);
     return true;
   } catch (error) {
-    console.log(`[gmail] auto-fill failed: ${error?.message || error}`);
+    console.log(`[gmail] 자동 입력 실패: ${error?.message || error}`);
     return false;
   }
 }
@@ -1092,8 +984,7 @@ async function findVerificationInputSelector(page) {
         rect.height > 0 &&
         input.type !== "hidden" &&
         input.type !== "email" &&
-        (
-          metadata.includes("code") ||
+        (metadata.includes("code") ||
           metadata.includes("otp") ||
           metadata.includes("token") ||
           metadata.includes("verification") ||
@@ -1101,40 +992,41 @@ async function findVerificationInputSelector(page) {
           metadata.includes("코드") ||
           input.autocomplete === "one-time-code" ||
           input.inputMode === "numeric" ||
-          input.type === "tel"
-        )
+          input.type === "tel")
       );
     });
 
-    const input = candidates[0] || [...document.querySelectorAll("input")].find(item => {
-      const style = getComputedStyle(item);
-      const rect = item.getBoundingClientRect();
-      const metadata = [
-        item.type,
-        item.name,
-        item.id,
-        item.autocomplete,
-        item.inputMode,
-        item.placeholder,
-        item.getAttribute("aria-label")
-      ]
-        .filter(Boolean)
-        .join(" ")
-        .toLowerCase();
+    const input =
+      candidates[0] ||
+      [...document.querySelectorAll("input")].find(item => {
+        const style = getComputedStyle(item);
+        const rect = item.getBoundingClientRect();
+        const metadata = [
+          item.type,
+          item.name,
+          item.id,
+          item.autocomplete,
+          item.inputMode,
+          item.placeholder,
+          item.getAttribute("aria-label")
+        ]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase();
 
-      return (
-        style.visibility !== "hidden" &&
-        style.display !== "none" &&
-        rect.width > 0 &&
-        rect.height > 0 &&
-        item.type !== "hidden" &&
-        item.type !== "email" &&
-        item.autocomplete !== "email" &&
-        !metadata.includes("email") &&
-        !metadata.includes("e-mail") &&
-        !metadata.includes("mail")
-      );
-    });
+        return (
+          style.visibility !== "hidden" &&
+          style.display !== "none" &&
+          rect.width > 0 &&
+          rect.height > 0 &&
+          item.type !== "hidden" &&
+          item.type !== "email" &&
+          item.autocomplete !== "email" &&
+          !metadata.includes("email") &&
+          !metadata.includes("e-mail") &&
+          !metadata.includes("mail")
+        );
+      });
     if (!input) return null;
 
     if (!input.id) input.id = `auto-code-input-${Date.now()}`;
@@ -1165,11 +1057,7 @@ async function clickVerificationSubmit(page) {
     const buttons = [...document.querySelectorAll("button, input[type='submit']")].filter(button => {
       const style = getComputedStyle(button);
       const rect = button.getBoundingClientRect();
-      const text = [
-        button.innerText,
-        button.value,
-        button.getAttribute("aria-label")
-      ]
+      const text = [button.innerText, button.value, button.getAttribute("aria-label")]
         .filter(Boolean)
         .join(" ")
         .toLowerCase();
@@ -1180,14 +1068,12 @@ async function clickVerificationSubmit(page) {
         rect.width > 0 &&
         rect.height > 0 &&
         !button.disabled &&
-        (
-          text.includes("continue") ||
+        (text.includes("continue") ||
           text.includes("verify") ||
           text.includes("submit") ||
           text.includes("확인") ||
           text.includes("계속") ||
-          text.includes("로그인")
-        )
+          text.includes("로그인"))
       );
     });
 
@@ -1197,8 +1083,8 @@ async function clickVerificationSubmit(page) {
     return true;
   });
 
-  if (clicked) console.log("[gmail] clicked verification submit button");
-  else console.log("[gmail] submit button not found after auto-fill");
+  if (clicked) console.log("[gmail] 인증 확인 버튼을 눌렀습니다.");
+  else console.log("[gmail] 자동 입력 후 인증 확인 버튼을 찾지 못했습니다.");
   return clicked;
 }
 
@@ -1212,7 +1098,10 @@ function isClaudeAppUrl(url, config) {
   try {
     const current = new URL(url);
     const base = new URL(config.baseUrl);
-    return current.hostname === base.hostname && ["/new", "/chat"].some(path => current.pathname === path || current.pathname.startsWith(`${path}/`));
+    return (
+      current.hostname === base.hostname &&
+      ["/new", "/chat"].some(path => current.pathname === path || current.pathname.startsWith(`${path}/`))
+    );
   } catch {
     return false;
   }
@@ -1254,15 +1143,11 @@ function extractNumericCodes(text) {
  */
 function printClaudeMail(mail) {
   console.log("\n[gmail] Claude 메일 발견");
-  if (mail.subject) console.log(`[gmail] subject: ${mail.subject}`);
-  if (mail.from) console.log(`[gmail] from: ${mail.from}`);
-  if (mail.date) console.log(`[gmail] date: ${mail.date}`);
-  if (mail.verificationCode) console.log(`[gmail] code: ${mail.verificationCode}`);
-  for (const link of mail.verificationLinks || []) {
-    console.log(`[gmail] link: ${link.text || "(no text)"} -> ${link.url}`);
-  }
-  if (mail.text) console.log(`[gmail] body:\n${mail.text}`);
-  else if (mail.snippet) console.log(`[gmail] snippet: ${mail.snippet}`);
+  if (mail.subject) console.log(`[gmail] 제목: ${mail.subject}`);
+  if (mail.from) console.log(`[gmail] 발신자: ${mail.from}`);
+  if (mail.date) console.log(`[gmail] 수신 시각: ${mail.date}`);
+  if (mail.verificationCode) console.log("[gmail] 인증 코드를 확보했습니다.");
+  console.log(`[gmail] 인증 링크 ${mail.verificationLinks?.length || 0}개를 확보했습니다.`);
 }
 
 /**
@@ -1280,6 +1165,10 @@ function createClaudeMailWatch(config, browser, loginPage) {
   return {
     enabled,
     done,
+    /**
+     * 로그인 완료나 브라우저 종료 시 메일 조회 사이의 대기를 취소한다.
+     * @returns {void} 반환값 없음
+     */
     stop() {
       controller.abort();
     }

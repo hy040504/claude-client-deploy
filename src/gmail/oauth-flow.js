@@ -1,137 +1,189 @@
 import { createServer } from "node:http";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { randomBytes, createHash } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
 import { google } from "googleapis";
-import { readGmailClientCredentials } from "./gmail-client.js";
-import { fromProjectRoot } from "../shared/paths.js";
+import { gmailAuthMode, readGmailClientCredentials } from "./gmail-client.js";
+import { pollRelayAuthSession, startRelayAuthSession } from "./relay-client.js";
+import { saveAccountCredentials } from "../accounts/account-store.js";
 
 const gmailReadonlyScope = "https://www.googleapis.com/auth/gmail.readonly";
 
 /**
- * 로컬 OAuth 콜백으로 Gmail refresh token을 발급받는다.
- * @param {object} config - 애플리케이션 설정
- * @returns {Promise<object>} 발급된 OAuth 토큰 정보
- * @throws {Error} OAuth 콜백 또는 토큰 교환이 실패할 때 발생
+ * 선택된 계정의 Gmail 인증 방식을 실행한다.
+ * @param {object} config - 계정 설정
+ * @param {string} modeArg - 명시적으로 지정한 인증 방식
+ * @returns {Promise<object>} 비밀 값을 제외한 인증 결과
  */
-export async function authorizeGmail(config) {
+export async function authorizeGmail(config, modeArg) {
+  const mode = gmailAuthMode({ ...config, gmailAuthMode: modeArg || config.gmailAuthMode });
+  return mode === "relay" ? authorizeGmailViaRelay(config) : authorizeGmailDirect(config);
+}
+
+/**
+ * Google에서 확인한 주소와 선택된 계정이 일치할 때만 토큰을 저장한다.
+ * @param {object} config - 계정 설정
+ * @returns {Promise<object>} 인증 결과
+ * @throws {Error} OAuth 실패, 계정 불일치 또는 refresh token 누락 시 발생
+ */
+export async function authorizeGmailDirect(config) {
   const { clientId, clientSecret } = readGmailClientCredentials(config);
   const callback = await createOAuthCallbackServer(config);
   const oauth2Client = new google.auth.OAuth2(clientId, clientSecret, callback.redirectUri);
+  const verifier = randomBytes(32).toString("base64url");
   const authUrl = oauth2Client.generateAuthUrl({
     access_type: "offline",
-    prompt: "consent",
-    scope: [gmailReadonlyScope]
+    prompt: "consent select_account",
+    scope: [gmailReadonlyScope],
+    state: callback.state,
+    login_hint: config.gmailUserEmail || undefined,
+    code_challenge: createHash("sha256").update(verifier).digest("base64url"),
+    code_challenge_method: "S256"
   });
-
-  console.log("아래 URL을 브라우저에서 열고 Google 로그인을 완료하세요.");
-  console.log(authUrl);
-  console.log(`\nOAuth 콜백 대기 중: ${callback.redirectUri}`);
-
   try {
+    console.error(`브라우저에서 선택한 Gmail 계정으로 인증하세요:\n${authUrl}`);
     const code = await callback.waitForCode();
-    const { tokens } = await oauth2Client.getToken(code);
-    const refreshToken = tokens.refresh_token || null;
-    const envUpdated = refreshToken ? updateDotEnvValue(fromProjectRoot(".env"), "GMAIL_REFRESH_TOKEN", refreshToken) : false;
-
-    return {
-      ok: true,
-      redirectUri: callback.redirectUri,
-      scope: gmailReadonlyScope,
-      refreshToken,
-      envUpdated,
-      envPath: fromProjectRoot(".env"),
-      accessTokenIssued: Boolean(tokens.access_token),
-      expiryDate: tokens.expiry_date || null
-    };
+    const { tokens } = await oauth2Client.getToken({ code, codeVerifier: verifier });
+    oauth2Client.setCredentials(tokens);
+    const gmail = google.gmail({ version: "v1", auth: oauth2Client });
+    const profile = await gmail.users.getProfile({ userId: "me" });
+    const sameMailbox = config.gmailUserEmail?.toLowerCase() === profile.data.emailAddress?.toLowerCase();
+    const refreshToken = tokens.refresh_token || (sameMailbox ? config.gmailRefreshToken : "");
+    if (!refreshToken) throw new Error("refresh token이 발급되지 않았습니다. Google 동의 화면에서 다시 인증하세요.");
+    const account = saveAccountCredentials(config, profile.data.emailAddress, { mode: "direct", refreshToken });
+    return { ok: true, mode: "direct", accountId: account.id, email: account.email, accountsPath: config.accountsPath };
   } finally {
     callback.close();
   }
 }
 
 /**
- * Google OAuth redirect를 받을 임시 로컬 서버를 연다.
- * @param {object} config - 애플리케이션 설정
- * @returns {Promise<object>} 콜백 서버 제어 객체
+ * relay 서버의 인증 세션을 기다리고 계정별 접근 토큰을 저장한다.
+ * @param {object} config - 계정 설정
+ * @returns {Promise<object>} 비밀 값을 제외한 인증 결과
+ * @throws {Error} 인증 실패 또는 제한 시간 초과 시 발생
  */
-export function createOAuthCallbackServer(config) {
-  const port = config.gmailAuthPort || 3000;
-  const path = config.gmailAuthPath || "/oauth2callback";
-  const bindHost = config.gmailAuthBindHost || "0.0.0.0";
-  const authHost = config.gmailAuthHost || "127.0.0.1";
-  const redirectUri = `http://${authHost}:${port}${path}`;
-
-  return new Promise((resolve, reject) => {
-    let finish;
-    let fail;
-    const codePromise = new Promise((innerResolve, innerReject) => {
-      finish = innerResolve;
-      fail = innerReject;
-    });
-
-    const server = createServer((request, response) => {
-      const url = new URL(request.url, `http://${request.headers.host}`);
-
-      if (url.pathname !== path) {
-        response.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
-        response.end("Not found");
-        return;
-      }
-
-      const error = url.searchParams.get("error");
-      if (error) {
-        response.writeHead(400, { "Content-Type": "text/plain; charset=utf-8" });
-        response.end("Google OAuth failed. You can close this tab.");
-        fail(new Error(`Google OAuth error: ${error}`));
-        return;
-      }
-
-      const code = url.searchParams.get("code");
-      if (!code) {
-        response.writeHead(400, { "Content-Type": "text/plain; charset=utf-8" });
-        response.end("Missing OAuth code. You can close this tab.");
-        fail(new Error("OAuth callback에 code가 없습니다."));
-        return;
-      }
-
-      response.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
-      response.end("Gmail OAuth token issued. You can close this tab.");
-      finish(code);
-    });
-
-    server.on("error", reject);
-    server.listen(port, bindHost, () => {
-      resolve({
-        redirectUri,
-        waitForCode: () => codePromise,
-        close: () => server.close()
+export async function authorizeGmailViaRelay(config) {
+  const started = await startRelayAuthSession(config);
+  console.error(`브라우저에서 Gmail 계정으로 인증하세요:\n${started.authUrl}`);
+  const timeoutMs = Math.min(started.expiresInMs || 300000, config.gmailAuthTimeoutMs || 300000);
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const current = await pollRelayAuthSession(
+      {
+        ...config,
+        requestTimeoutMs: Math.min(config.requestTimeoutMs || 30000, Math.max(1, deadline - Date.now()))
+      },
+      started.sessionId
+    );
+    if (current.status === "authorized") {
+      if (!current.sessionToken || !current.email)
+        throw new Error("relay 인증 응답에 토큰 또는 Gmail 주소가 없습니다.");
+      const account = saveAccountCredentials(config, current.email, {
+        mode: "relay",
+        sessionToken: current.sessionToken,
+        serverUrl: config.gmailRelayServerUrl
       });
-    });
-  });
+      return {
+        ok: true,
+        mode: "relay",
+        accountId: account.id,
+        email: account.email,
+        accountsPath: config.accountsPath
+      };
+    }
+    if (["error", "expired", "denied"].includes(current.status)) throw new Error(`relay 인증 실패: ${current.status}`);
+    if (current.status !== "pending") throw new Error("알 수 없는 relay 인증 상태입니다.");
+    await delay(Math.min(config.gmailRelayPollMs || 2500, Math.max(1, deadline - Date.now())));
+  }
+  throw new Error("relay Gmail 인증 대기 시간이 초과되었습니다.");
 }
 
 /**
- * .env 파일의 특정 값을 갱신하거나 없으면 추가한다.
- * @param {string} path - .env 파일 경로
- * @param {string} key - 갱신할 환경 변수 이름
- * @param {string} value - 저장할 환경 변수 값
- * @returns {boolean} 갱신 성공 여부
+ * state 검증과 제한 시간이 있는 로컬 OAuth callback 서버를 연다.
+ * @param {object} config - callback 주소와 대기 시간 설정
+ * @returns {Promise<object>} redirect URI, state, 코드 대기 및 종료 함수
+ * @throws {Error} 서버 시작 실패 또는 잘못된 callback 설정 시 발생
  */
-export function updateDotEnvValue(path, key, value) {
-  const lines = existsSync(path) ? readFileSync(path, "utf8").split(/\r?\n/) : [];
-  let replaced = false;
-  const nextLines = lines.map(line => {
-    if (line.trimStart().startsWith(`${key}=`)) {
-      replaced = true;
-      return `${key}=${value}`;
-    }
-
-    return line;
+export async function createOAuthCallbackServer(config) {
+  const host = config.gmailAuthHost || "127.0.0.1";
+  const bindHost = config.gmailAuthBindHost || "127.0.0.1";
+  if (!["127.0.0.1", "localhost", "[::1]"].includes(host))
+    throw new Error("직접 OAuth callback 주소는 로컬 loopback이어야 합니다.");
+  const path = config.gmailAuthPath || "/oauth2callback";
+  if (!/^\/[a-zA-Z0-9/_-]*$/.test(path)) throw new Error("OAuth callback 경로를 확인하세요.");
+  const state = randomBytes(32).toString("hex");
+  let finish;
+  let fail;
+  let timer;
+  const codePromise = new Promise((resolve, reject) => {
+    finish = resolve;
+    fail = reject;
   });
+  // 서버 시작 직후 취소돼도 처리되지 않은 Promise 거부가 남지 않게 한다.
+  codePromise.catch(() => {});
+  const server = createServer(handleCallback);
 
-  if (!replaced) {
-    if (nextLines.length && nextLines.at(-1) !== "") nextLines.push("");
-    nextLines.push(`${key}=${value}`);
+  /**
+   * 잘못된 callback은 거부하고 올바른 인증 응답만 대기자에게 전달한다.
+   * @param {import("node:http").IncomingMessage} request - callback 요청
+   * @param {import("node:http").ServerResponse} response - callback 응답
+   * @returns {void} 반환값 없음
+   */
+  function handleCallback(request, response) {
+    const url = new URL(request.url, "http://127.0.0.1");
+    response.setHeader("Content-Type", "text/plain; charset=utf-8");
+    response.setHeader("Cache-Control", "no-store");
+    if (request.method !== "GET" || url.pathname !== path) {
+      response.writeHead(404).end("Not found");
+      return;
+    }
+    if (url.searchParams.get("state") !== state) {
+      response.writeHead(400).end("OAuth state mismatch");
+      return;
+    }
+    const error = url.searchParams.get("error");
+    const code = url.searchParams.get("code");
+    if (error) {
+      response.writeHead(400).end("Google 인증이 취소되었습니다. 터미널로 돌아가세요.");
+      fail(new Error(`Google OAuth 실패: ${error}`));
+    } else if (!code) {
+      response.writeHead(400).end("Missing OAuth code");
+      return;
+    } else {
+      response.writeHead(200).end("인증 응답을 받았습니다. 터미널에서 저장 결과를 확인하세요.");
+      finish(code);
+    }
+    clearTimeout(timer);
+    server.close();
   }
 
-  writeFileSync(path, nextLines.join("\n").replace(/\n*$/, "\n"));
-  return true;
+  /**
+   * 취소 시 열린 서버와 대기 중인 인증을 함께 정리한다.
+   * @returns {void} 반환값 없음
+   */
+  function close() {
+    clearTimeout(timer);
+    fail(new Error("OAuth callback 대기가 종료되었습니다."));
+    server.close();
+    server.closeAllConnections();
+  }
+
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(config.gmailAuthPort ?? 3000, bindHost, resolve);
+  });
+  const redirectUri = `http://${host}:${server.address().port}${path}`;
+  timer = setTimeout(() => {
+    fail(new Error("Google OAuth 인증 대기 시간이 초과되었습니다."));
+    server.close();
+    server.closeAllConnections();
+  }, config.gmailAuthTimeoutMs || 300000);
+  /**
+   * callback에서 검증한 인증 코드를 기다린다.
+   * @returns {Promise<string>} OAuth 인증 코드
+   */
+  function waitForCode() {
+    return codePromise;
+  }
+  return { redirectUri, state, waitForCode, close };
 }

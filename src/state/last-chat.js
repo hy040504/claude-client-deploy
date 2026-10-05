@@ -1,4 +1,5 @@
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
+import { mkdirSync, existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 
 /**
  * 이어서 대화하기에 필요한 마지막 채팅 정보를 저장한다.
@@ -8,6 +9,7 @@ import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
  */
 export function saveLastChat(path, value) {
   if (!value?.conversationId) return;
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   writeFileSync(path, JSON.stringify(value, null, 2));
 }
 

@@ -48,14 +48,28 @@ const CYCLETLS_SHUTDOWN_TIMEOUT_MS = 5000;
  * CycleTLS 기반 HTTP 클라이언트를 만든다.
  * @param {object} config - 애플리케이션 설정
  * @param {object} state - 브라우저 상태
- * @param {object} cookieJar - tough-cookie jar
+ * @param {object} cookieJar - 세션 쿠키를 보관하는 tough-cookie 저장소
  * @param {Function} persistJar - cookie jar 저장 함수
  * @returns {object} Axios 호환 최소 HTTP 클라이언트
  */
 export function createCycleTlsHttpClient(config, state, cookieJar, persistJar) {
   return {
+    /**
+     * 본문이 없는 조회 요청을 공통 HTTP 처리기로 전달한다.
+     * @param {string} url - 상대 또는 절대 요청 주소
+     * @param {object} options - 헤더와 응답 처리 옵션
+     * @returns {Promise<object>} 조회 응답
+     */
     get: (url, options = {}) => request("GET", url, undefined, options),
-    post: (url, body, options = {}) => request("POST", url, body, options)
+    post: request.bind(null, "POST"),
+    put: request.bind(null, "PUT"),
+    /**
+     * Axios 호출 형식에 맞춰 options.data를 삭제 요청의 본문으로 전달한다.
+     * @param {string} url - 상대 또는 절대 요청 주소
+     * @param {object} options - 요청 본문과 헤더 옵션
+     * @returns {Promise<object>} 삭제 응답
+     */
+    delete: (url, options = {}) => request("DELETE", url, options.data, options)
   };
 
   /**
@@ -66,7 +80,7 @@ export function createCycleTlsHttpClient(config, state, cookieJar, persistJar) {
    * @param {object} options - 요청 옵션
    * @returns {Promise<object>} Axios 호환 응답
    */
-  async function request(method, inputUrl, body, options) {
+  async function request(method, inputUrl, body, options = {}) {
     const url = resolveUrl(config.baseUrl, inputUrl);
     const requestHeaders = buildRequestHeaders(config, state, method, options.headers || {});
     normalizeCycleTlsAcceptEncoding(requestHeaders);
@@ -74,22 +88,26 @@ export function createCycleTlsHttpClient(config, state, cookieJar, persistJar) {
     if (cookieHeader) requestHeaders.Cookie = cookieHeader;
 
     const cycleTLS = await getCycleTls(config);
-    const response = await cycleTLS(url, {
-      headers: requestHeaders,
-      body: serializeBody(body),
-      responseType: "text",
-      timeout: Math.max(1, Math.ceil(config.requestTimeoutMs / 1000)),
-      userAgent: requestHeaders["User-Agent"] || requestHeaders["user-agent"] || config.userAgent,
-      ja3: config.cycleTlsJa3 || undefined,
-      ja4r: config.cycleTlsJa4r || undefined,
-      http2Fingerprint: config.cycleTlsHttp2Fingerprint || undefined,
-      forceHTTP1: config.cycleTlsForceHttp1,
-      forceHTTP3: config.cycleTlsForceHttp3,
-      disableRedirect: false,
-      enableConnectionReuse: true,
-      orderAsProvided: true,
-      headerOrder: headerOrder(requestHeaders)
-    }, method.toLowerCase());
+    const response = await cycleTLS(
+      url,
+      {
+        headers: requestHeaders,
+        body: serializeBody(body),
+        responseType: "text",
+        timeout: Math.max(1, Math.ceil(config.requestTimeoutMs / 1000)),
+        userAgent: requestHeaders["User-Agent"] || requestHeaders["user-agent"] || config.userAgent,
+        ja3: config.cycleTlsJa3 || undefined,
+        ja4r: config.cycleTlsJa4r || undefined,
+        http2Fingerprint: config.cycleTlsHttp2Fingerprint || undefined,
+        forceHTTP1: config.cycleTlsForceHttp1,
+        forceHTTP3: config.cycleTlsForceHttp3,
+        disableRedirect: false,
+        enableConnectionReuse: true,
+        orderAsProvided: true,
+        headerOrder: headerOrder(requestHeaders)
+      },
+      method.toLowerCase()
+    );
 
     const headers = normalizeResponseHeaders(response.headers);
     persistSetCookies(cookieJar, response.finalUrl || url, headers);
@@ -152,11 +170,7 @@ export async function shutdownCycleTls() {
     );
     if (typeof cycleTLS?.exit !== "function") return;
 
-    await withTimeout(
-      cycleTLS.exit(),
-      CYCLETLS_SHUTDOWN_TIMEOUT_MS,
-      "CycleTLS shutdown timed out"
-    );
+    await withTimeout(cycleTLS.exit(), CYCLETLS_SHUTDOWN_TIMEOUT_MS, "CycleTLS shutdown timed out");
   } catch (error) {
     console.error(`[cycletls] ${error?.message || error}`);
   }
@@ -236,7 +250,7 @@ function normalizeResponseHeaders(headers) {
 
 /**
  * Set-Cookie 응답을 jar에 반영한다.
- * @param {object} cookieJar - tough-cookie jar
+ * @param {object} cookieJar - 세션 쿠키를 보관하는 tough-cookie 저장소
  * @param {string} baseUrl - 기준 URL
  * @param {object} headers - 응답 헤더
  * @returns {void} 반환값 없음
@@ -256,8 +270,8 @@ function persistSetCookies(cookieJar, baseUrl, headers) {
  * @returns {unknown} 파싱된 응답 데이터
  */
 function parseResponseData(data, headers, options) {
-  if (options.responseType === "text") return String(data ?? "");
   const contentType = String(headers["content-type"] || "");
+  if (options.responseType === "text" && !contentType.includes("application/json")) return String(data ?? "");
   if (!contentType.includes("application/json")) return data;
   if (typeof data !== "string") return data;
 

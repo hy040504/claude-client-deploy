@@ -20,7 +20,7 @@ export function logoutClaudeSession(config) {
   const missing = [];
 
   // JSON 파싱을 방해하지 않도록 정보성 로그는 stderr로 출력한다.
-  const log = (msg) => process.stderr.write(msg + "\n");
+  const log = console.error;
 
   log(chalk.cyan("\n[logout] Claude 세션 데이터 정리 중..."));
 
@@ -59,9 +59,10 @@ export function logoutClaudeSession(config) {
 
   return {
     ok: failed.length === 0,
-    message: failed.length === 0 
-      ? "Claude 세션 데이터가 정리되었습니다. 다른 계정으로 로그인하려면 `npm run browser-login`을 실행하세요."
-      : "일부 세션 데이터를 삭제하지 못했습니다. 로그의 안내에 따라 수동 정리를 진행해 주세요.",
+    message:
+      failed.length === 0
+        ? "현재 계정의 Claude 세션을 정리했습니다. 다시 로그인하려면 npm run login:it를 실행하세요."
+        : "일부 세션 데이터를 삭제하지 못했습니다. 로그의 안내에 따라 수동 정리를 진행해 주세요.",
     cleared: cleared.map(target => ({ key: target.key, path: target.path })),
     failed: failed.map(target => ({ key: target.key, path: target.path, error: target.error })),
     missing: missing.map(target => ({ key: target.key, path: target.path }))

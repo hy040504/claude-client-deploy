@@ -26,10 +26,7 @@ export function parseSse(raw) {
  */
 export function summarizeCompletion(response, conversationId) {
   const parsed = parseSse(response.data);
-  const assistantText = parsed.events
-    .filter(isTextDeltaEvent)
-    .map(textFromDeltaEvent)
-    .join("");
+  const assistantText = parsed.events.filter(isTextDeltaEvent).map(textFromDeltaEvent).join("");
   const messageStart = parsed.events.find(isMessageStartEvent)?.data?.message;
 
   return {
@@ -37,7 +34,7 @@ export function summarizeCompletion(response, conversationId) {
     statusText: response.statusText,
     requestId: response.headers["request-id"],
     conversationId,
-    assistantMessageUuid: messageStart?.uuid || null,
+    assistantMessageUuid: messageStart?.uuid || messageStart?.id || null,
     assistantMessageId: messageStart?.id || null,
     assistantText,
     events: parsed.eventNames
@@ -61,12 +58,12 @@ export function keepRawResponse(data) {
 function parseSseBlock(block) {
   const lines = block.split(/\r?\n/);
   const eventLine = lines.find(line => line.startsWith("event:"));
-  const dataLine = lines.find(line => line.startsWith("data:"));
-  if (!eventLine || !dataLine) return null;
+  const dataLines = lines.filter(line => line.startsWith("data:"));
+  if (!eventLine || !dataLines.length) return null;
 
   return {
     event: eventLine.slice("event:".length).trim(),
-    data: parseJsonOrText(dataLine.slice("data:".length).trim())
+    data: parseJsonOrText(dataLines.map(line => line.slice("data:".length).trim()).join("\n"))
   };
 }
 

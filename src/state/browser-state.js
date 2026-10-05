@@ -1,4 +1,5 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
+import { mkdirSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 
 /**
@@ -29,5 +30,6 @@ export function loadBrowserState(path) {
  * @returns {void} 반환값 없음
  */
 export function saveBrowserState(path, value) {
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   writeFileSync(path, JSON.stringify(value, null, 2));
 }

@@ -19,14 +19,16 @@ export function browserHeaders(config, state, method, referer) {
   const generatedHeaders = {
     "User-Agent": config.userAgent,
     Accept: "*/*",
-    "Accept-Language": config.acceptLanguage || (config.locale === "ko-KR" ? "ko,ko-KR;q=0.9,en-US;q=0.8,en;q=0.7" : config.locale),
+    "Accept-Language":
+      config.acceptLanguage || (config.locale === "ko-KR" ? "ko,ko-KR;q=0.9,en-US;q=0.8,en;q=0.7" : config.locale),
     "Accept-Encoding": config.acceptEncoding,
     "sec-ch-ua": '"Google Chrome";v="147", "Not.A/Brand";v="8", "Chromium";v="147"',
     "sec-ch-ua-mobile": "?0",
     "sec-ch-ua-platform": quoteClientHint(config.browserPlatform || "Windows"),
     "sec-ch-ua-platform-version": quoteClientHint(config.secChUaPlatformVersion || ""),
     "sec-ch-ua-full-version": '"147.0.7727.138"',
-    "sec-ch-ua-full-version-list": '"Google Chrome";v="147.0.7727.138", "Not.A/Brand";v="8.0.0.0", "Chromium";v="147.0.7727.138"',
+    "sec-ch-ua-full-version-list":
+      '"Google Chrome";v="147.0.7727.138", "Not.A/Brand";v="8.0.0.0", "Chromium";v="147.0.7727.138"',
     "sec-ch-ua-arch": '"x86"',
     "sec-ch-ua-bitness": '"64"',
     "sec-ch-ua-model": '""',

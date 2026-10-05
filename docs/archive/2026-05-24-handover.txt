@@ -1,0 +1,144 @@
+# Project Handover - claude-client
+Last Updated: 2026-05-24
+
+## 1. Current Status
+
+Status: Active development
+
+The project is a Node.js based unofficial Claude.ai CLI client. It uses Claude.ai web cookies and browser-assisted login rather than the official Anthropic SDK. The current focus is keeping prompt-chat and prompt-chat2 feature-compatible while prompt-chat2 provides a Claude CLI-like TUI experience.
+
+## 2. Important Product Split
+
+prompt-chat:
+- Plain text CLI.
+- Best suited for feature testing and debugging.
+- Keeps menu-driven flows simple and explicit.
+
+prompt-chat2:
+- Same core feature logic as prompt-chat.
+- Chat screen uses Claude CLI-like TUI.
+- Includes framed composer, help/status lines, spinner, stream rendering, and code highlighting.
+
+When adding a user-facing feature, implement it in both prompt-chat and prompt-chat2 unless the change is strictly visual TUI work.
+
+## 3. Current Feature Set
+
+Shared menu flow:
+1. Cookie refresh / login
+2. Start new chat
+3. Continue existing chat
+4. Clear saved resume state
+5. Delete chat session
+6. Rename chat session
+7. Delete all chat sessions
+8. Full Claude session logout
+0. Exit
+
+Chat management:
+- Conversation rename and delete are implemented through Claude web API calls.
+- Delete payload uses list item data when available, because Claude's delete endpoint can depend on the conversation object shape.
+- All conversation delete requires explicit confirmation with DELETE ALL.
+- Last chat state is cleared when the referenced conversation is deleted.
+
+Conversation listing:
+- The intended structure is hybrid.
+- Existing list fallback remains available.
+- Newer v2 list logic with starred/unstarred merge is preferred where available.
+
+## 4. Login and Session State
+
+Primary state files:
+- session-cookie-jar.json
+- client-state.json
+- last-chat.json
+- tmp/latest-claude-code.json
+- .browser-profile
+
+Login options:
+- Simplified integrated login and cookie jar save.
+- Existing background login.
+- Existing interactive login.
+- Manual Cookie header input.
+
+Known behavior:
+- CycleTLS-only nonce exchange can fail with Cloudflare 403.
+- Browser-assisted magic-link handling is the more reliable route.
+- Headless login can fail to receive full login cookies depending on current Claude.ai and Cloudflare behavior.
+
+## 5. TUI Notes for prompt-chat2
+
+Current TUI goals:
+- Keep input area aligned and stable.
+- Support pasted multi-line text without accidental auto-send.
+- Stream assistant text visibly instead of only printing final output.
+- Keep /exit returning cleanly to the main menu.
+- Use Claude CLI-like spinner and message layout.
+- Improve readability with role colors, Markdown-style emphasis, and code block highlighting.
+
+Recent TUI work:
+- Assistant response color changed to a more readable warm neutral.
+- Code fences, inline code, headings, quotes, lists, bold text, and code blocks are styled.
+- Code block rendering now applies token-level foreground/background styles instead of wrapping the entire line afterward.
+- Code block wrapping preserves indentation and spaces better than normal prose wrapping.
+
+## 6. API and SSE Notes
+
+Recent fixes:
+- SSE parser joins multi-line data fields.
+- assistantMessageUuid now accepts message.uuid and message.id.
+- If the stream does not return assistantMessageUuid, the code fetches the conversation and recovers the latest assistant message uuid.
+- New chat flow avoids sending the next message without a valid parent message uuid.
+- CycleTLS client parses JSON responses even when responseType is text, unless the response is clearly non-JSON.
+- Rename/delete operations throw when the HTTP status is not 2xx.
+
+## 7. Removed Code
+
+Rammerhead support has been removed.
+
+Removed items:
+- package.json import-rammerhead script
+- src/session/rammerhead-import.js
+- command-dispatcher import-rammerhead branch
+- RAMMERHEAD_SESSION_PATH and rammerheadSessionPath config
+- import-rammerhead usage text
+
+Do not reintroduce Rammerhead references unless a new design explicitly requires it.
+
+## 8. Validation Commands
+
+Use these after edits:
+
+```bash
+node --check src/prompts/chat-prompt.js
+node --check src/prompts/chat-prompt2.js
+node --check src/claude/api.js
+node --check src/claude/sse.js
+node --check src/cli/command-dispatcher.js
+node --check src/config/app-config.js
+npm run check:jsdoc
+```
+
+For documentation-only changes, JSON and JSDoc checks are usually enough if package or source files were not touched.
+
+## 9. Development Rules
+
+- Follow AGENTS.md.
+- All functions need Korean JSDoc.
+- Comments should explain WHY, not obvious WHAT.
+- Keep comments concise and Korean.
+- Prefer clearer names or small refactors over redundant comments.
+- Do not revert unrelated local changes.
+
+## 10. Known Risks and Next Steps
+
+Known risks:
+- Claude.ai private web API can change without notice.
+- Cloudflare behavior changes can break login automation.
+- Cookie expiry and organization selection can affect account_profile and conversation list calls.
+- TUI paste handling on Windows Terminal is sensitive to bracketed paste and multi-character key sequences.
+
+Recommended next checks:
+- Manually verify prompt-chat2 code highlighting with fenced JS, JSON, Python, and shell snippets.
+- Verify rename/delete changes on the Claude web UI after API calls.
+- Verify full conversation delete clears last-chat when needed.
+- Test login on a clean profile after deleting session-cookie-jar.json, client-state.json, and .browser-profile.

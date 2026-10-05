@@ -1,4 +1,5 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
+import { mkdirSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { Cookie, CookieJar } from "tough-cookie";
 import { redact } from "../shared/mask.js";
 
@@ -24,6 +25,7 @@ export function loadJar(path) {
  * @returns {void} 반환값 없음
  */
 export function saveJar(path, cookieJar) {
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   writeFileSync(path, JSON.stringify(cookieJar.serializeSync(), null, 2));
 }
 

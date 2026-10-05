@@ -16,7 +16,10 @@ export function loadDotEnv(path) {
     if (index === -1) continue;
 
     const key = trimmed.slice(0, index).trim();
-    const value = trimmed.slice(index + 1).trim().replace(/^"(.*)"$/, "$1");
+    const value = trimmed
+      .slice(index + 1)
+      .trim()
+      .replace(/^"(.*)"$/, "$1");
 
     if (!(key in process.env)) process.env[key] = value;
   }

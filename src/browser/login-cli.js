@@ -8,7 +8,7 @@ import { shutdownCycleTls } from "../http/cycletls-client.js";
  * @returns {Promise<void>} 로그인 쿠키 저장 완료
  */
 export async function runBrowserLoginCli(overrides = {}) {
-  const config = { ...createAppConfig(), ...overrides };
+  const config = { ...createAppConfig(overrides), ...overrides };
   try {
     const cookies = await collectBrowserCookies(config);
     saveCookiesToJar(config, cookies);

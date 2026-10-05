@@ -2,7 +2,6 @@ import { seedCapturedCookie } from "../state/cookie-jar.js";
 import { browserDebug } from "../browser/api-session.js";
 import { browserHeaders } from "../http/browser-headers.js";
 import { logoutClaudeSession } from "../session/logout.js";
-import { importRammerheadSession } from "../session/rammerhead-import.js";
 import { findLatestClaudeMail } from "../gmail/latest-claude-mail.js";
 import { authorizeGmail } from "../gmail/oauth-flow.js";
 
@@ -14,7 +13,7 @@ import { authorizeGmail } from "../gmail/oauth-flow.js";
  * @returns {Promise<object|undefined>} 명령 실행 결과
  */
 export async function runCliCommand(runtime, name, args) {
-  const { api, config, jar, persistJar, persistState, state } = runtime;
+  const { api, config, jar, persistJar, state } = runtime;
 
   switch (name) {
     case "profile":
@@ -29,6 +28,10 @@ export async function runCliCommand(runtime, name, args) {
       return api.sendChatMessage(...chatSendArgs(config, args));
     case "chat-get":
       return api.getChatConversation(...chatGetArgs(config, args));
+    case "chat-rename":
+      return api.renameChatConversation(...chatRenameArgs(config, args));
+    case "chat-delete":
+      return api.deleteChatConversation(...chatDeleteArgs(config, args));
     case "chat-title":
       return api.generateChatTitle(...chatTitleArgs(config, args));
     case "cookies":
@@ -37,17 +40,6 @@ export async function runCliCommand(runtime, name, args) {
       seedCapturedCookie(jar, config.baseUrl, args.join(" "));
       persistJar();
       return { ok: true, cookies: await api.listCookies() };
-    case "import-rammerhead": {
-      const result = await importRammerheadSession({
-        config,
-        jar,
-        state,
-        inputPath: args[0],
-      });
-      persistJar();
-      persistState();
-      return result;
-    }
     case "logout":
       return logoutClaudeSession(config);
     case "gmail-latest":
@@ -56,7 +48,7 @@ export async function runCliCommand(runtime, name, args) {
         maxResults: Number.parseInt(args[1] || String(config.gmailClaudeMaxResults || 20), 10)
       });
     case "gmail-auth":
-      return authorizeGmail(config);
+      return authorizeGmail(config, args[0]);
     case "browser-debug":
       return runBrowserDebugCommand(config, state, args);
     case "help":
@@ -112,6 +104,28 @@ export function chatTitleArgs(config, args) {
 }
 
 /**
+ * 대화 이름 변경 명령 인자를 API 인자로 정규화한다.
+ * @param {object} config - 애플리케이션 설정
+ * @param {string[]} args - CLI 인자
+ * @returns {string[]} renameChatConversation 인자
+ */
+export function chatRenameArgs(config, args) {
+  if (isExplicitOrgArg(args[0])) return [args[0], args[1], args.slice(2).join(" ")];
+  return [config.orgId || "auto", args[0], args.slice(1).join(" ")];
+}
+
+/**
+ * 대화 삭제 명령 인자를 API 인자로 정규화한다.
+ * @param {object} config - 애플리케이션 설정
+ * @param {string[]} args - CLI 인자
+ * @returns {string[]} deleteChatConversation 인자
+ */
+export function chatDeleteArgs(config, args) {
+  if (isExplicitOrgArg(args[0])) return [args[0], args[1]];
+  return [config.orgId || "auto", args[0]];
+}
+
+/**
  * 첫 번째 인자가 명시적 조직 ID인지 판단한다.
  * @param {string} value - 검사할 CLI 인자
  * @returns {boolean} 조직 ID 또는 auto 여부
@@ -140,7 +154,9 @@ async function runBrowserDebugCommand(config, state, args) {
     const inputUrl = args[2] || "/api/account_profile";
     const body = args[3];
     const referer = args[4] || `${config.baseUrl}/new`;
-    const url = inputUrl.startsWith("http") ? inputUrl : `${config.baseUrl}${inputUrl.startsWith("/") ? "" : "/"}${inputUrl}`;
+    const url = inputUrl.startsWith("http")
+      ? inputUrl
+      : `${config.baseUrl}${inputUrl.startsWith("/") ? "" : "/"}${inputUrl}`;
     const headers = browserHeaders(config, state, method, referer);
 
     if (method === "GET") delete headers["Content-Type"];

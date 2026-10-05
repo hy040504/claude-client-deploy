@@ -1,11 +1,11 @@
-import { spawn } from 'node:child_process';
+import { spawn } from "node:child_process";
 import chalk from "chalk";
 
 /**
- * py-arkose-token-generator를 사용해 Arkose Token 생성
- * @param {string} blob - Arkose blob (c= 값)
- * @param {string} publicKey - Arkose Public Key
- * @returns {Promise<string>} Arkose Token
+ * 설치된 Python 연동 스크립트에 검증 데이터를 전달하고 결과를 읽는다.
+ * @param {string} blob - 서버가 제공한 검증 데이터
+ * @param {string} publicKey - 대상 서비스의 공개 키
+ * @returns {Promise<string|null>} Python에서 얻은 토큰 또는 실패 시 null
  */
 export async function solveWithPyArkose(blob, publicKey = "EEA5F558-D6AC-4C03-B678-AABF639EE69A") {
   if (!blob) {
@@ -15,10 +15,10 @@ export async function solveWithPyArkose(blob, publicKey = "EEA5F558-D6AC-4C03-B6
 
   console.log(chalk.cyan(`[py-arkose] Solver 시작 | blob: ${blob.slice(0, 80)}...`));
 
-  return new Promise((resolve) => {
+  return new Promise(resolve => {
     // Windows 환경 고려하여 'python' 우선 시도
-    const pythonProcess = spawn('python', [
-      '-c',
+    const pythonProcess = spawn("python", [
+      "-c",
       `
 import json
 import sys
@@ -70,16 +70,18 @@ except Exception as e:
       `
     ]);
 
-    let output = '';
-    pythonProcess.stdout.on('data', (data) => { output += data; });
-    pythonProcess.stderr.on('data', (data) => { 
-        const errStr = data.toString();
-        if (errStr.trim() && !errStr.includes("Debugger warning")) {
-            console.error(chalk.red(`[py-arkose] stderr: ${errStr}`)); 
-        }
+    let output = "";
+    pythonProcess.stdout.on("data", data => {
+      output += data;
+    });
+    pythonProcess.stderr.on("data", data => {
+      const errStr = data.toString();
+      if (errStr.trim() && !errStr.includes("Debugger warning")) {
+        console.error(chalk.red(`[py-arkose] stderr: ${errStr}`));
+      }
     });
 
-    pythonProcess.on('close', (code) => {
+    pythonProcess.on("close", code => {
       if (code !== 0) {
         console.error(chalk.red(`[py-arkose] Python 프로세스 종료 코드: ${code}`));
         resolve(`dummy-py-arkose-error-${Date.now()}`);

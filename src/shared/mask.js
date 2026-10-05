@@ -5,7 +5,7 @@
  */
 export function redact(value) {
   if (!value) return value;
-  if (value.length <= 16) return value;
+  if (value.length <= 16) return "***";
   return `${value.slice(0, 8)}...${value.slice(-6)}`;
 }
 
@@ -56,5 +56,20 @@ export function maskArg(value) {
  * @returns {string} 로그용 명령 문자열
  */
 export function formatCommandPreview(command, args) {
+  if (command === "seed-cookie") return `${command} [쿠키 숨김]`;
   return [command, ...args.map(maskArg)].join(" ");
+}
+
+/**
+ * 인증 링크를 로그로 남길 때 주소의 사용자 정보, 쿼리와 해시 값을 숨긴다.
+ * @param {string} value - 로그에 표시할 원본 주소
+ * @returns {string} 도메인과 경로만 식별할 수 있는 주소
+ */
+export function redactUrl(value) {
+  try {
+    const url = new URL(value);
+    return `${url.origin}${url.pathname}${url.search ? "?[숨김]" : ""}${url.hash ? "#[숨김]" : ""}`;
+  } catch {
+    return "[주소 숨김]";
+  }
 }

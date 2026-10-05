@@ -1,12 +1,2 @@
-import { runChatPrompt } from "./src/prompts/chat-prompt.js";
-import { shutdownCycleTls } from "./src/http/cycletls-client.js";
-import chalk from "chalk";
-
-try {
-  await runChatPrompt();
-} catch (error) {
-  console.error(chalk.red(error?.stack || error?.message || error));
-  process.exitCode = 1;
-} finally {
-  await shutdownCycleTls();
-}
+// 기존 실행 명령을 유지하기 위한 호환 진입점이다.
+import "./chat-cli.js";

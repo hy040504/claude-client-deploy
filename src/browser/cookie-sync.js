@@ -1,8 +1,8 @@
 /**
  * tough-cookie jar의 쿠키를 Puppeteer가 받는 형식으로 변환한다.
- * @param {object} jar - tough-cookie cookie jar
+ * @param {object} jar - 세션 쿠키를 보관하는 tough-cookie 저장소
  * @param {string} baseUrl - Claude 기준 URL
- * @returns {Promise<object[]>} Puppeteer setCookie payload
+ * @returns {Promise<object[]>} Puppeteer에 주입할 쿠키 목록
  */
 export async function jarCookiesToPuppeteerPayload(jar, baseUrl) {
   const originalCookies = await jar.getCookies(baseUrl);
@@ -22,7 +22,7 @@ export async function jarCookiesToPuppeteerPayload(jar, baseUrl) {
  * 저장된 cookie jar를 열린 브라우저 페이지에 주입한다.
  * @param {object} page - Puppeteer page 객체
  * @param {string} baseUrl - Claude 기준 URL
- * @param {object} jar - tough-cookie cookie jar
+ * @param {object} jar - 세션 쿠키를 보관하는 tough-cookie 저장소
  * @returns {Promise<void>} 쿠키 주입 완료
  */
 export async function applyJarCookies(page, baseUrl, jar) {
@@ -54,7 +54,7 @@ export function toSetCookieLine(cookie) {
  * 브라우저 페이지의 최신 쿠키를 cookie jar에 반영한다.
  * @param {object} page - Puppeteer page 객체
  * @param {object} config - 애플리케이션 설정
- * @param {object} jar - tough-cookie cookie jar
+ * @param {object} jar - 세션 쿠키를 보관하는 tough-cookie 저장소
  * @returns {Promise<void>} 쿠키 반영 완료
  */
 export async function persistPageCookiesToJar(page, config, jar) {

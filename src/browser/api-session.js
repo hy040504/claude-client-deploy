@@ -1,3 +1,4 @@
+import { withTimeout } from "../shared/async.js";
 import { setTimeout as delay } from "node:timers/promises";
 import { cloneBrowserProfile, connectRealBrowser, removeBrowserProfileClone } from "./real-browser.js";
 import { loadJar, saveJar } from "../state/cookie-jar.js";
@@ -78,9 +79,10 @@ export async function browserDebug(config, state = null, mode = "fetch", request
 }
 
 /**
- * 브라우저 fetch에 사용할 격리된 Chrome 세션을 연다.
- * @param {object} config - 애플리케이션 설정
- * @returns {Promise<object>} 브라우저 세션 정보
+ * 원본 프로필의 잠금 충돌을 피하도록 복제한 프로필로 요청용 브라우저를 연다.
+ * @param {object} config - 브라우저와 계정 설정
+ * @param {string} mode - background 또는 interactive 실행 모드
+ * @returns {Promise<object>} 브라우저와 페이지 및 정리할 임시 경로
  */
 async function openBrowserFetchSession(config, mode = "background") {
   const profileClonePath = runStep("cloning browser profile", () => cloneBrowserProfile(config.profilePath));
@@ -132,7 +134,9 @@ async function openBrowserFetchSessionWithFallback(config, mode) {
       throw error;
     }
 
-    console.error(`[browserFetch] background mode failed before request, retrying interactive Chrome: ${error.message}`);
+    console.error(
+      `[browserFetch] background mode failed before request, retrying interactive Chrome: ${error.message}`
+    );
     const session = await openBrowserFetchSession(config, "interactive");
     console.error("[browserFetch] interactive Chrome fallback is active.");
     return session;
@@ -236,6 +240,10 @@ async function createRequestHeaderCapture(page, request) {
     resolveCaptured = resolve;
   });
 
+  /**
+   * 기본 헤더와 추가 헤더 이벤트가 모두 도착할 여유를 둔 뒤 수집을 마친다.
+   * @returns {void} 반환값 없음
+   */
   const finalizeCapture = () => {
     if (!capturedHeaders) return;
     clearTimeout(finalizeTimer);
@@ -244,6 +252,11 @@ async function createRequestHeaderCapture(page, request) {
     }, 150);
   };
 
+  /**
+   * 대상 URL과 메서드가 일치하는 요청의 기본 헤더를 기록한다.
+   * @param {object} params - Chrome DevTools의 요청 이벤트
+   * @returns {void} 반환값 없음
+   */
   const onRequestWillBeSent = params => {
     if (captured && !requestIds.has(params?.requestId)) return;
     if (params?.request?.url !== request.url) return;
@@ -258,6 +271,11 @@ async function createRequestHeaderCapture(page, request) {
     finalizeCapture();
   };
 
+  /**
+   * 순서가 뒤바뀌어 도착할 수 있는 추가 헤더를 요청 ID에 맞춰 합친다.
+   * @param {object} params - Chrome DevTools의 추가 헤더 이벤트
+   * @returns {void} 반환값 없음
+   */
   const onRequestWillBeSentExtraInfo = params => {
     if (!params?.requestId) return;
     extraHeadersByRequestId.set(params.requestId, params.headers || {});
@@ -275,12 +293,15 @@ async function createRequestHeaderCapture(page, request) {
   client.on("Network.requestWillBeSentExtraInfo", onRequestWillBeSentExtraInfo);
 
   return {
-    read: () =>
-      withTimeout(
-        capturedPromise,
-        1500,
-        "captured request headers were not observed"
-      ),
+    /**
+     * 헤더 수집이 끝날 때까지 제한 시간 안에서 기다린다.
+     * @returns {Promise<object>} 수집한 요청 헤더
+     */
+    read: () => withTimeout(capturedPromise, 1500, "captured request headers were not observed"),
+    /**
+     * 헤더 수집 타이머와 이벤트 구독을 해제해 브라우저 종료를 막지 않도록 한다.
+     * @returns {Promise<void>} 구독 해제 완료
+     */
     close: async () => {
       clearTimeout(finalizeTimer);
       client.off("Network.requestWillBeSent", onRequestWillBeSent);
@@ -340,22 +361,6 @@ function runStep(label, action) {
 }
 
 /**
- * 외부 라이브러리 호출이 무기한 대기하지 않도록 제한 시간을 건다.
- * @param {Promise<unknown>} promise - 제한 시간을 적용할 Promise
- * @param {number} timeoutMs - 제한 시간(ms)
- * @param {string} message - timeout 오류 메시지
- * @returns {Promise<unknown>} 원본 Promise 결과
- */
-function withTimeout(promise, timeoutMs, message) {
-  return Promise.race([
-    promise,
-    delay(timeoutMs).then(() => {
-      throw new Error(message);
-    })
-  ]);
-}
-
-/**
  * Chrome 종료가 멈추면 연결 해제와 프로세스 종료를 시도한다.
  * @param {object} browser - Puppeteer browser 객체
  * @returns {Promise<void>} 브라우저 종료 시도 완료
@@ -399,7 +404,7 @@ function isPromiseLike(value) {
  * 브라우저에서 갱신된 쿠키를 jar 파일에 저장한다.
  * @param {object} page - Puppeteer page 객체
  * @param {object} config - 애플리케이션 설정
- * @param {object} jar - tough-cookie cookie jar
+ * @param {object} jar - 세션 쿠키를 보관하는 tough-cookie 저장소
  * @returns {Promise<void>} 쿠키 저장 완료
  */
 async function persistPageCookies(page, config, jar) {
@@ -415,11 +420,10 @@ async function persistPageCookies(page, config, jar) {
  */
 async function waitForChallengeClear(page) {
   try {
-    await page.waitForFunction(
-      () => !document.title.toLowerCase().includes("just a moment"),
-      { timeout: 45000 }
-    );
+    await page.waitForFunction(() => !document.title.toLowerCase().includes("just a moment"), { timeout: 45000 });
   } catch {
-    throw new Error("브라우저 세션이 Cloudflare challenge를 통과하지 못했습니다. 열린 Chrome 창에서 Claude가 정상 화면까지 로드되는지 확인하세요.");
+    throw new Error(
+      "브라우저 세션이 Cloudflare challenge를 통과하지 못했습니다. 열린 Chrome 창에서 Claude가 정상 화면까지 로드되는지 확인하세요."
+    );
   }
 }

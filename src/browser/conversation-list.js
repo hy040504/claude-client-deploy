@@ -19,10 +19,7 @@ export async function loadConversationListFromBrowser(config) {
   try {
     await applyJarCookies(page, config.baseUrl, jar);
     await page.goto(`${config.baseUrl}/new`, { waitUntil: "domcontentloaded", timeout: 120000 });
-    await page.waitForFunction(
-      () => document.querySelectorAll('a[href^="/chat/"]').length > 0,
-      { timeout: 30000 }
-    );
+    await page.waitForFunction(() => document.querySelectorAll('a[href^="/chat/"]').length > 0, { timeout: 30000 });
 
     return await page.evaluate(() => {
       const items = [];

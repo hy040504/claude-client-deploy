@@ -7,15 +7,16 @@ import { saveLastChat } from "../state/last-chat.js";
 
 /**
  * 설정, 상태, 쿠키 jar, Claude API 클라이언트를 하나의 런타임으로 묶는다.
+ * @param {object} options - 계정 선택 또는 이미 확정된 config
  * @returns {object} CLI에서 사용할 런타임 객체
  */
-export function createRuntime() {
-  const config = createAppConfig();
+export function createRuntime(options = {}) {
+  const config = options.config || createAppConfig(options);
   const state = loadBrowserState(config.statePath);
   const jar = loadJar(config.jarPath);
 
   seedBrowserCookies(jar, config.baseUrl, state);
-  seedCapturedCookie(jar, config.baseUrl, process.env.CAPTURED_COOKIE);
+  seedCapturedCookie(jar, config.baseUrl, config.capturedCookie);
 
   /**
    * 현재 cookie jar를 디스크에 저장한다.

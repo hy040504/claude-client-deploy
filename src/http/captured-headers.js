@@ -1,10 +1,4 @@
-const UNSAFE_HEADER_NAMES = new Set([
-  "content-length",
-  "host",
-  "cookie",
-  "set-cookie",
-  "referer"
-]);
+const UNSAFE_HEADER_NAMES = new Set(["content-length", "host", "cookie", "set-cookie", "referer"]);
 
 /**
  * 캡처한 브라우저 요청 헤더를 파싱한다.

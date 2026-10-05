@@ -1,4 +1,6 @@
-import { createGmailClient, extractMessageLinks, extractMessageText, getHeader, isClaudeMail } from "./gmail-client.js";
+import { createGmailClient, gmailAuthMode } from "./gmail-client.js";
+import { extractMessageContent, getHeader, isClaudeMail } from "./message-parser.js";
+import { fetchRelayLatestMail } from "./relay-client.js";
 
 /**
  * Gmail에서 Claude가 보낸 가장 최근 메일을 찾고 본문을 추출한다.
@@ -7,28 +9,70 @@ import { createGmailClient, extractMessageLinks, extractMessageText, getHeader, 
  * @param {string} [options.query] - Gmail 검색 쿼리
  * @param {number} [options.maxResults] - 확인할 최대 메일 수
  * @param {boolean} [options.allowMissing=false] - 메일이 없을 때 null을 반환할지 여부
- * @returns {Promise<object>} 최신 Claude 메일 요약
+ * @returns {Promise<object|null>} 최신 Claude 메일 요약 또는 누락을 허용했을 때 null
  * @throws {Error} Gmail 인증 실패 또는 메일을 찾지 못했을 때 발생
  */
 export async function findLatestClaudeMail(config, options = {}) {
-  const { gmail, userId } = createGmailClient(config);
-  const query = options.query || config.gmailClaudeQuery || "newer_than:30d";
-  const maxResults = Number.isInteger(options.maxResults) ? options.maxResults : config.gmailClaudeMaxResults || 20;
+  return createClaudeMailReader(config)(options);
+}
 
-  const list = await gmail.users.messages.list({
-    userId,
-    q: query,
-    maxResults,
-    includeSpamTrash: false
-  });
+/**
+ * 한 번의 메일 감시 동안 OAuth 클라이언트를 재사용해 access token을 반복 발급하지 않는다.
+ * @param {object} config - 감시 시작 시 고정한 계정 설정
+ * @param {object} [client] - 직접 조회를 대신할 테스트용 Gmail 클라이언트
+ * @returns {Function} 검색 옵션을 받아 최신 메일을 조회하는 함수
+ */
+export function createClaudeMailReader(config, client) {
+  if (gmailAuthMode(config) === "relay") return fetchRelayLatestMail.bind(null, config);
+  const directClient = client || createGmailClient(config);
+  return readLatest;
+
+  /**
+   * 이미 발급받은 인증 정보를 유지하면서 메일을 검색한다.
+   * @param {object} [options={}] - 검색 조건과 메일 누락 허용 여부
+   * @returns {Promise<object|null>} 최신 메일 또는 null
+   */
+  function readLatest(options = {}) {
+    return findLatestDirectMail(config, options, directClient);
+  }
+}
+
+/**
+ * 직접 Gmail API에서 최신 Claude 메일을 찾는다.
+ * @param {object} config - 계정 설정
+ * @param {object} options - 검색 옵션
+ * @param {object} client - 테스트 또는 서버에서 주입할 Gmail 클라이언트
+ * @returns {Promise<object|null>} 최신 메일 또는 null
+ */
+export async function findLatestDirectMail(config, options = {}, client = createGmailClient(config)) {
+  const { gmail, userId } = client;
+  const query = options.query || config.gmailClaudeQuery || "newer_than:30d";
+  const maxResults = options.maxResults ?? config.gmailClaudeMaxResults ?? 20;
+  const requestOptions = { timeout: config.requestTimeoutMs || 30000, signal: options.signal };
+
+  if (!Number.isInteger(maxResults) || maxResults < 1 || maxResults > 500)
+    throw new Error("maxResults는 1~500 사이의 정수여야 합니다.");
+
+  const list = await gmail.users.messages.list(
+    {
+      userId,
+      q: query,
+      maxResults,
+      includeSpamTrash: false
+    },
+    requestOptions
+  );
 
   const messages = list.data.messages || [];
   for (const item of messages) {
-    const message = await gmail.users.messages.get({
-      userId,
-      id: item.id,
-      format: "full"
-    });
+    const message = await gmail.users.messages.get(
+      {
+        userId,
+        id: item.id,
+        format: "full"
+      },
+      requestOptions
+    );
 
     const normalized = normalizeGmailMessage(message.data);
     if (!isClaudeMail(normalized)) continue;
@@ -61,8 +105,7 @@ export async function findLatestClaudeMail(config, options = {}) {
  */
 export function normalizeGmailMessage(message) {
   const headers = message?.payload?.headers || [];
-  const text = extractMessageText(message?.payload);
-  const links = extractMessageLinks(message?.payload);
+  const { text, links } = extractMessageContent(message?.payload);
 
   return {
     messageId: message?.id || "",
@@ -85,10 +128,7 @@ export function normalizeGmailMessage(message) {
 export function extractVerificationCode(text) {
   if (!text) return null;
 
-  const patterns = [
-    /\b(\d{6})\b/,
-    /\b(\d{5})\b/
-  ];
+  const patterns = [/\b(\d{6})\b/, /\b(\d{5})\b/];
 
   for (const pattern of patterns) {
     const match = text.match(pattern);
@@ -105,13 +145,17 @@ export function extractVerificationCode(text) {
  */
 export function findVerificationLinks(mail) {
   return (mail.links || []).filter(link => {
-    const haystack = `${link.text || ""} ${link.url || ""}`.toLowerCase();
-    return (
-      haystack.includes("login") ||
-      haystack.includes("로그인") ||
-      haystack.includes("verify") ||
-      haystack.includes("verification") ||
-      haystack.includes("claude.ai")
-    );
+    try {
+      const url = new URL(link.url);
+      return (
+        url.protocol === "https:" &&
+        url.hostname === "claude.ai" &&
+        !url.username &&
+        !url.password &&
+        /(?:magic-link|login|verify|verification)/i.test(url.pathname)
+      );
+    } catch {
+      return false;
+    }
   });
 }

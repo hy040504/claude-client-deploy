@@ -7,3 +7,6 @@ export { runIndexCli } from "./cli/index-cli.js";
 export { runBrowserLoginCli } from "./browser/login-cli.js";
 export { runClientPrompt } from "./prompts/client-prompt.js";
 export { runChatPrompt } from "./prompts/chat-prompt.js";
+export { runChatPrompt2 } from "./prompts/chat-prompt2.js";
+export { runChatMenu } from "./chat/menu.js";
+export { addAccount, readAccountStore, selectAccount } from "./accounts/account-store.js";

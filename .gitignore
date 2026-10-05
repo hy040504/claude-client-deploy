@@ -1,6 +1,11 @@
 node_modules/
+.data/
+tmp/
 .env
 *.json
+!package.json
+!package-lock.json
+!.prettierrc.json
 .browser-profile/
 .geminiignore
 .gemini/
